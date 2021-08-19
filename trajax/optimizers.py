@@ -797,7 +797,10 @@ def cem(cost,
     hyperparams = default_cem_hyperparams()
   mean, stdev = init_controls
   mean = np.array(mean) # np.array(init_controls)
-  stdev = np.array(stdev) # np.array([(control_high - control_low) / 2.] * init_controls.shape[0])
+  if stdev is None:
+    stdev = np.array([(control_high - control_low) / 2.] * mean.shape[0])
+  else:
+    stdev = np.array(stdev)  
   obj_fn = partial(objective, cost, dynamics)
 
   def loop_body(_, args):
