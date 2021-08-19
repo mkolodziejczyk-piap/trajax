@@ -795,8 +795,9 @@ def cem(cost,
     random_key = random.PRNGKey(0)
   if hyperparams is None:
     hyperparams = default_cem_hyperparams()
-  mean = np.array(init_controls)
-  stdev = np.array([(control_high - control_low) / 2.] * init_controls.shape[0])
+  mean, stdev = init_controls
+  mean = np.array(mean) # np.array(init_controls)
+  stdev = np.array(stdev) # np.array([(control_high - control_low) / 2.] * init_controls.shape[0])
   obj_fn = partial(objective, cost, dynamics)
 
   def loop_body(_, args):
