@@ -815,7 +815,7 @@ def cem(cost,
 
   X = rollout(dynamics, mean, init_state)
   obj = objective(cost, dynamics, mean, init_state)
-  return X, mean, obj
+  return X, mean, stdev, obj
 
 
 @partial(jit, static_argnums=(0, 1, 7))
