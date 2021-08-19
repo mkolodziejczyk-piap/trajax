@@ -47,6 +47,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from frozendict import frozendict
 from functools import partial  # pylint: disable=g-importing-member
 
 import jax
@@ -817,7 +818,7 @@ def cem(cost,
   return X, mean, obj
 
 
-@partial(jit, static_argnums=(0, 1, 9))
+@partial(jit, static_argnums=(0, 1, 7))
 def random_shooting(cost,
                     dynamics,
                     init_state,
