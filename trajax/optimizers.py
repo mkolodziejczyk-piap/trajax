@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lint as: python3
 # pylint: disable=invalid-name
 """Building Blocks for Gradient-based Trajectory Optimizers.
 
@@ -56,6 +57,7 @@ from jax import hessian
 from jax import jacobian
 from jax import jit
 from jax import lax
+from jax import ops
 from jax import random
 from jax import vmap
 import jax.numpy as np
@@ -234,7 +236,7 @@ def _objective_fwd(cost, dynamics, U, x0, cost_args, dynamics_args):
 
 
 def _objective_bwd(cost, dynamics, res, g):
-  return (g * grad_wrt_controls(cost, dynamics, *res),) + (None,) * 3
+  return (g * _grad_wrt_inputs(cost, dynamics, *res),) + (None,) * 3
 
 
 _objective.defvjp(_objective_fwd, _objective_bwd)
@@ -273,7 +275,7 @@ def adjoint(A, B, q, r):
   return np.flipud(g), np.vstack((np.flipud(P[:T - 1]), q[T])), p
 
 
-def grad_wrt_controls(cost, dynamics, U, x0, cost_args, dynamics_args):
+def _grad_wrt_inputs(cost, dynamics, U, x0, cost_args, dynamics_args):
   """Evaluates gradient at a control sequence.
 
   Args:
@@ -313,7 +315,7 @@ def hvp(cost, dynamics, U, x0, V, cost_args, dynamics_args):
   Returns:
     gradient (T, m) of total cost with respect to controls.
   """
-  grad_fn = partial(grad_wrt_controls, cost, dynamics)
+  grad_fn = partial(_grad_wrt_inputs, cost, dynamics)
   return jax.jvp(lambda U1: grad_fn(U1, x0, cost_args, dynamics_args), (U,),
                  (V,))
 
@@ -342,15 +344,15 @@ def ddp_rollout(dynamics, X, U, K, k, alpha, *args):
   T, m = U.shape
   Xnew = np.zeros((T + 1, n))
   Unew = np.zeros((T, m))
-  Xnew = Xnew.at[0].set(X[0])
+  Xnew = ops.index_update(Xnew, ops.index[0], X[0])
 
   def body(t, inputs):
     Xnew, Unew = inputs
     del_u = alpha * k[t] + np.matmul(K[t], Xnew[t] - X[t])
     u = U[t] + del_u
     x = dynamics(Xnew[t], u, t, *args)
-    Unew = Unew.at[t].set(u)
-    Xnew = Xnew.at[t + 1].set(x)
+    Unew = ops.index_update(Unew, ops.index[t], u)
+    Xnew = ops.index_update(Xnew, ops.index[t + 1], x)
     return Xnew, Unew
 
   return lax.fori_loop(0, T, body, (Xnew, Unew))
@@ -417,7 +419,6 @@ def ilqr(cost,
          maxiter=100,
          grad_norm_threshold=1e-4,
          make_psd=False,
-         psd_delta=0.0,
          alpha_0=1.0,
          alpha_min=0.00005):
   """Iterative Linear Quadratic Regulator.
@@ -430,9 +431,6 @@ def ilqr(cost,
     maxiter: maximum iterations.
     grad_norm_threshold: tolerance for stopping optimization.
     make_psd: whether to zero negative eigenvalues after quadratization.
-    psd_delta: The delta value to make the problem PSD. Specifically, it will
-      ensure that d^2c/dx^2 and d^2c/du^2, i.e. the hessian of cost function
-      with respect to state and control are always positive definite.
     alpha_0: initial line search value.
     alpha_min: minimum line search value.
 
@@ -448,15 +446,15 @@ def ilqr(cost,
   cost_fn, cost_args = custom_derivatives.closure_convert(cost, x0, U[0], 0)
   dynamics_fn, dynamics_args = custom_derivatives.closure_convert(
       dynamics, x0, U[0], 0)
-  return ilqr_base(cost_fn, dynamics_fn, x0, U, tuple(cost_args),
-                   tuple(dynamics_args), maxiter, grad_norm_threshold, make_psd,
-                   psd_delta, alpha_0, alpha_min)
+  return _ilqr(cost_fn, dynamics_fn, x0, U, tuple(cost_args),
+               tuple(dynamics_args), maxiter, grad_norm_threshold, make_psd,
+               alpha_0, alpha_min)
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(0, 1))
 @partial(jit, static_argnums=(0, 1))
-def ilqr_base(cost, dynamics, x0, U, cost_args, dynamics_args, maxiter,
-              grad_norm_threshold, make_psd, psd_delta, alpha_0, alpha_min):
+def _ilqr(cost, dynamics, x0, U, cost_args, dynamics_args, maxiter,
+          grad_norm_threshold, make_psd, alpha_0, alpha_min):
   """ilqr implementation."""
 
   T, m = U.shape
@@ -467,7 +465,7 @@ def ilqr_base(cost, dynamics, x0, U, cost_args, dynamics_args, maxiter,
   dynamics_jacobians = linearize(dynamics)
   cost_gradients = linearize(cost)
   evaluator = partial(evaluate, cost)
-  psd = vmap(partial(project_psd_cone, delta=psd_delta))
+  psd = vmap(project_psd_cone)
 
   X = roll(U, x0, *dynamics_args)
   timesteps = np.arange(X.shape[0])
@@ -527,7 +525,7 @@ def ilqr_base(cost, dynamics, x0, U, cost_args, dynamics_args, maxiter,
 
 def _ilqr_fwd(cost, dynamics, *args):
   """Forward pass of custom vector-Jacobian product implementation."""
-  ilqr_output = ilqr_base(cost, dynamics, *args)  # pylint: disable=no-value-for-parameter
+  ilqr_output = _ilqr(cost, dynamics, *args)  # pylint: disable=no-value-for-parameter
   X, U, _, _, adjoints, lqr, _ = ilqr_output
   return ilqr_output, (args, X, U, adjoints, lqr)
 
@@ -558,7 +556,7 @@ def _ilqr_bwd(cost, dynamics, fwd_residuals, gX_gU_gNonDifferentiableOutputs):
   return (zeros_like_args[:2] + ((gradients, *zeros_like_args[2][1:]),) +
           zeros_like_args[3:])
 
-ilqr_base.defvjp(_ilqr_fwd, _ilqr_bwd)
+_ilqr.defvjp(_ilqr_fwd, _ilqr_bwd)
 
 
 def hamiltonian(cost, dynamics):
@@ -647,7 +645,7 @@ def scipy_minimize(cost,
   """
 
   obj_fn = jit(partial(objective, cost, dynamics))
-  grad_fn = jit(partial(grad_wrt_controls, cost, dynamics,
+  grad_fn = jit(partial(_grad_wrt_inputs, cost, dynamics,
                         cost_args=(), dynamics_args=()))
   T, m = U.shape
 
@@ -683,7 +681,6 @@ def scipy_minimize(cost,
 
 
 # Sampling based Zeroth Order Optimization via Cross-Entropy Method
-
 
 def default_cem_hyperparams():
   return {
@@ -740,8 +737,9 @@ def gaussian_samples(random_key, mean, stdev, control_low, control_high,
   smoothing_coef = hyperparams['sampling_smoothing']
 
   def body_fun(t, noises):
-    return noises.at[:, t].set(smoothing_coef * noises[:, t - 1] +
-                               np.sqrt(1 - smoothing_coef**2) * noises[:, t])
+    return jax.ops.index_update(
+        noises, jax.ops.index[:, t], smoothing_coef * noises[:, t - 1] +
+        np.sqrt(1 - smoothing_coef**2) * noises[:, t])
 
   noises = jax.lax.fori_loop(1, horizon, body_fun, noises)
   samples = noises * stdev
@@ -868,203 +866,3 @@ def random_shooting(cost,
   X = rollout(dynamics, mean, init_state)
   obj = objective(cost, dynamics, mean, init_state)
   return X, U, obj
-
-
-# Constrained Iterative LQR
-
-
-@partial(jit, static_argnums=(0, 1, 4, 5, 12,))
-def constrained_ilqr(
-    cost,
-    dynamics,
-    x0,
-    U,
-    equality_constraint=lambda x, u, t: np.empty(1),
-    inequality_constraint=lambda x, u, t: np.empty(1),
-    maxiter_al=5,
-    maxiter_ilqr=100,
-    grad_norm_threshold=1.0e-4,
-    constraints_threshold=1.0e-2,
-    penalty_init=1.0,
-    penalty_update_rate=10.0,
-    make_psd=True,
-    psd_delta=0.0,
-    alpha_0=1.0,
-    alpha_min=0.00005):
-  """Constrained Iterative Linear Quadratic Regulator.
-
-  Args:
-    cost:      cost(x, u, t) returns scalar.
-    dynamics:  dynamics(x, u, t) returns next state (n, ) nd array.
-    x0: initial_state - 1D np array of shape (n, ); should satisfy constraints
-      at t == 0.
-
-    U: initial_controls - 2D np array of shape (T, m); this input does not have
-      to be initially feasible.
-    equality_constraint: equality_constraint(x, u, t) == 0 returns
-      (num_equality, ) nd array.
-    inequality_constraint: inequality_constraint(x, u, t) <= 0 returns
-      (num_inequality, ) nd array.
-    maxiter_al: maximum number of outer-loop augmented Lagrangian dual and
-      penalty updates.
-    maxiter_ilqr: maximum iterations for iLQR.
-    grad_norm_threshold: tolerance for stopping iLQR optimization
-      before augmented Lagrangian update.
-    constraints_threshold: tolerance for constraint violation (infinity norm).
-    penalty_init: initial penalty value.
-    penalty_update_rate: update rate for increasing penalty.
-    make_psd: whether to zero negative eigenvalues after quadratization.
-    psd_delta: The delta value to make the problem PSD. Specifically, it will
-      ensure that d^2c/dx^2 and d^2c/du^2, i.e. the hessian of cost function
-      with respect to state and control are always positive definite.
-    alpha_0: initial line search value.
-    alpha_min: minimum line search value.
-
-  Returns:
-    X: optimal state trajectory - nd array of shape (T+1, n).
-    U: optimal control trajectory - nd array of shape (T, m).
-    dual_equality: approximate dual (equality) trajectory - nd array of shape
-      (T+1, num_equality).
-    dual_inequality: approximate dual (inequality) trajectory nd array of shape
-      (T+1, num_inequality).
-    penalty: final penalty value.
-    equality_constraints: final constraint (equality) violation trajectory - nd
-      array of shape (T+1, num_equality).
-    inequality_constraints: final constraint (inequality) violation trajectory -
-      nd array of shape (T+1, num_inequality).
-    max_constraint_violation: maximum equality or inequality violation.
-    obj: final augmented Lagrangian objective achieved.
-    gradient: gradient at the solution returned.
-    iteration_ilqr: cumulative number of iLQR iterations for entire constrained
-      solve upon convergence.
-    iteration_al: number of augmented Lagrangian outer-loop iterations upon
-      convergence.
-
-  """
-
-  # horizon
-  horizon = len(U) + 1
-  t_range = np.arange(horizon)
-
-  # rollout
-  X = rollout(dynamics, U, x0)
-
-  # augmented Lagrangian methods
-  def augmented_lagrangian(x, u, t, dual_equality, dual_inequality, penalty):
-    # stage cost
-    J = cost(x, u, t)
-
-    # stage equality constraint
-    equality = equality_constraint(x, u, t)
-
-    # stage inequality constraint
-    inequality = inequality_constraint(x, u, t)
-
-    # active set
-    active_set = np.invert(
-        np.isclose(dual_inequality[t], 0.0) & (inequality < 0.0))
-
-    # update cost
-    # TODO(taylorhowell): Gauss-Newton approximation for constraints,
-    # specifically in the Hessian of the objective
-    J += dual_equality[t].T @ equality + 0.5 * penalty * equality.T @ equality
-    J += dual_inequality[t].T @ inequality + 0.5 * penalty * inequality.T @ (
-        active_set * inequality)
-
-    return J
-
-  def dual_update(constraint, dual, penalty):
-    return dual + penalty * constraint
-
-  def inequality_projection(dual):
-    return np.maximum(dual, 0.0)
-
-  # vectorize
-  equality_constraint_mapped = vectorize(equality_constraint)
-  inequality_constraint_mapped = vectorize(inequality_constraint)
-  dual_update_mapped = vmap(dual_update, in_axes=(0, 0, None))
-
-  # evaluate constraints
-  U_pad = pad(U)
-  equality_constraints = equality_constraint_mapped(X, U_pad, t_range)
-  inequality_constraints = inequality_constraint_mapped(X, U_pad, t_range)
-
-  # initialize dual variables
-  dual_equality = np.zeros_like(equality_constraints)
-  dual_inequality = np.zeros_like(inequality_constraints)
-
-  # initialize penalty
-  penalty = penalty_init
-
-  def body(inputs):
-    # unpack
-    _, U, dual_equality, dual_inequality, penalty, equality_constraints, inequality_constraints, _, _, _, iteration_ilqr, iteration_al = inputs
-
-    # augmented Lagrangian parameters
-    al_args = {
-        'dual_equality': dual_equality,
-        'dual_inequality': dual_inequality,
-        'penalty': penalty,
-    }
-
-    # solve iLQR problem
-    X, U, obj, gradient, _, _, iteration = ilqr(
-        partial(augmented_lagrangian, **al_args),
-        dynamics,
-        x0,
-        U,
-        grad_norm_threshold=grad_norm_threshold,
-        make_psd=make_psd,
-        psd_delta=psd_delta,
-        alpha_0=alpha_0,
-        alpha_min=alpha_min,
-        maxiter=maxiter_ilqr)
-
-    # evalute constraints
-    U_pad = pad(U)
-
-    equality_constraints = equality_constraint_mapped(X, U_pad, t_range)
-
-    inequality_constraints = inequality_constraint_mapped(X, U_pad, t_range)
-    inequality_constraints_projected = inequality_projection(
-        inequality_constraints)
-
-    max_constraint_violation = np.maximum(
-        np.max(np.abs(equality_constraints)),
-        np.max(inequality_constraints_projected))
-
-    # augmented Lagrangian update
-    dual_equality = dual_update_mapped(equality_constraints, dual_equality,
-                                       penalty)
-
-    dual_inequality = dual_update_mapped(inequality_constraints,
-                                         dual_inequality, penalty)
-    dual_inequality = inequality_projection(dual_inequality)
-
-    penalty *= penalty_update_rate
-
-    # increment
-    iteration_ilqr += iteration
-    iteration_al += 1
-
-    return X, U, dual_equality, dual_inequality, penalty, equality_constraints, inequality_constraints, max_constraint_violation, obj, gradient, iteration_ilqr, iteration_al
-
-  def continuation_criteria(inputs):
-    # unpack
-    dual_inequality = inputs[3]
-    inequality_constraints = inputs[6]
-    max_constraint_violation = inputs[7]
-    iteration_al = inputs[11]
-    max_complementary_slack = np.max(
-        np.abs(inequality_constraints * dual_inequality))
-    # check maximum constraint violation and augmented Lagrangian iterations
-    return np.logical_and(iteration_al < maxiter_al,
-                          np.logical_or(
-                              max_constraint_violation > constraints_threshold,
-                              max_complementary_slack > constraints_threshold))
-
-  return lax.while_loop(
-      continuation_criteria, body,
-      (X, U, dual_equality, dual_inequality, penalty,
-       equality_constraints, inequality_constraints, np.inf, np.inf,
-       np.full(U.shape, np.inf), 0, 0))
